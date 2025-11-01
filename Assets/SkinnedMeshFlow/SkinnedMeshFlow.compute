@@ -1,0 +1,66 @@
+#pragma kernel CSInit
+#pragma kernel CSMain
+#pragma kernel CSPost
+
+struct Edge
+{
+    int index0;
+    int index1;
+};
+
+struct StandardVertex
+{
+    float3 position;
+    float3 normal;
+    float4 tangent;
+};
+
+float4x4 Matrix;
+int VertexCount;
+int EdgeCount;
+RWStructuredBuffer<StandardVertex> OriginalVertexBuffer;
+RWStructuredBuffer<StandardVertex> VertexBuffer;
+RWStructuredBuffer<Edge> EdgeBuffer;
+RWStructuredBuffer<int> CountBuffer;
+RWStructuredBuffer<int> Output0Buffer;
+RWStructuredBuffer<float> Output1Buffer;
+
+int ToFixed(float value) {
+    return int(value * 1e5);
+}
+
+float ToFloat(int value) {
+    return float(value) * 1e-5;
+}
+
+[numthreads(1024, 1, 1)]
+void CSInit (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= uint(VertexCount)) return;
+
+    Output0Buffer[id.x] = 0;
+}
+
+[numthreads(1024, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= uint(EdgeCount)) return;
+
+    int index0 = EdgeBuffer[id.x].index0;
+    int index1 = EdgeBuffer[id.x].index1;
+    float3 src0 = OriginalVertexBuffer[index0].position;
+    float3 src1 = OriginalVertexBuffer[index1].position;
+    float3 dst0 = mul(Matrix, float4(VertexBuffer[index0].position, 1.0)).xyz;
+    float3 dst1 = mul(Matrix, float4(VertexBuffer[index1].position, 1.0)).xyz;
+    float shrink = length(dst1 - dst0) / length(src1 - src0);
+    InterlockedAdd(Output0Buffer[index0], ToFixed(shrink / CountBuffer[index0]));
+    InterlockedAdd(Output0Buffer[index1], ToFixed(shrink / CountBuffer[index1]));
+}
+
+[numthreads(1024, 1, 1)]
+void CSPost (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= uint(VertexCount)) return;
+
+    Output1Buffer[id.x] = ToFloat(Output0Buffer[id.x]);
+}
