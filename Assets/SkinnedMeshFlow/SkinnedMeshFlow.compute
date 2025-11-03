@@ -1,12 +1,4 @@
-#pragma kernel CSInit
 #pragma kernel CSMain
-#pragma kernel CSPost
-
-struct Edge
-{
-    int index0;
-    int index1;
-};
 
 struct StandardVertex
 {
@@ -15,60 +7,146 @@ struct StandardVertex
     float4 tangent;
 };
 
+float3x3 inverse(float3x3 m)
+{
+    float det = determinant(m);
+    if (abs(det) < 1e-6) return 0;
+
+    float n11 =   m._22 * m._33 - m._23 * m._32;
+    float n12 = -(m._12 * m._33 - m._13 * m._32);
+    float n13 =   m._12 * m._23 - m._13 * m._22;
+    float n21 = -(m._21 * m._33 - m._23 * m._31);
+    float n22 =   m._11 * m._33 - m._13 * m._31;
+    float n23 = -(m._11 * m._23 - m._13 * m._21);
+    float n31 =   m._21 * m._32 - m._22 * m._31;
+    float n32 = -(m._11 * m._32 - m._12 * m._31);
+    float n33 =   m._11 * m._22 - m._12 * m._21;
+    float3x3 n = float3x3(n11, n12, n13, n21, n22, n23, n31, n32, n33);
+    return (1 / det) * n;
+}
+
+void jacobiRotate(inout float3x3 A, inout float3x3 V, int p, int q)
+{
+    if (abs(A[p][q]) < 1e-8) return;
+
+    // compute rotation angle
+    float tau = (A[q][q] - A[p][p]) / (2 * A[p][q]);
+    float t = 1 / (abs(tau) + sqrt(1 + tau * tau));
+    if (tau < 0) t = -t;
+
+    // compute cosine and sine
+    float cosine = 1 / sqrt(1 + t * t);
+    float sine = t * cosine;
+
+    // A <- J^T * A * J
+    float App = A[p][p];
+    float Aqq = A[q][q];
+    float Apq = A[p][q];
+    
+    // (k != p, q) none diagonal element
+    int k = 3 - p - q; 
+    float Apk = A[p][k];
+    float Aqk = A[q][k];
+
+    A[p][p] = App - t * Apq;
+    A[q][q] = Aqq + t * Apq;
+    A[p][q] = A[q][p] = 0;
+    A[p][k] = A[k][p] = cosine * Apk - sine * Aqk;
+    A[q][k] = A[k][q] = sine * Apk + cosine * Aqk;
+
+    // V <- V * J
+    for (int i = 0; i < 3; i++)
+    {
+        float Vip = V[i][p];
+        float Viq = V[i][q];
+        V[i][p] = cosine * Vip - sine * Viq;
+        V[i][q] = sine * Vip + cosine * Viq;
+    }
+}
+
+void eigenDecomp(in float3x3 M, out float3 eigenValues, out float3x3 eigenVectors)
+{
+    const int MAX_ITERATIONS = 30;
+
+    eigenVectors = float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1);
+    float3x3 A = M;
+
+    [loop]
+    for (int n = 0; n < MAX_ITERATIONS; n++)
+    {
+        jacobiRotate(A, eigenVectors, 0, 1);
+        jacobiRotate(A, eigenVectors, 1, 2);
+        jacobiRotate(A, eigenVectors, 2, 0);
+    }
+
+    eigenValues = float3(A._11, A._22, A._33);
+}
+
 int VertexCount;
-int EdgeCount;
 float4x4 AdjustMatrix;
 
 RWStructuredBuffer<StandardVertex> SrcVertexBuffer;
 RWStructuredBuffer<StandardVertex> DstVertexBuffer;
-RWStructuredBuffer<Edge> EdgeBuffer;
-RWStructuredBuffer<int> DegreeBuffer;
+RWStructuredBuffer<int> AdjacentBuffer;
+RWStructuredBuffer<int2> AddressBuffer;
+RWStructuredBuffer<float4> EigenBuffer;
 
-RWStructuredBuffer<int> FixedBuffer;
-RWStructuredBuffer<float> FloatBuffer;
-
-int ToFixed(float value) {
-    return int(value * 1e5);
-}
-
-float ToFloat(int value) {
-    return float(value) * 1e-5;
-}
-
-[numthreads(1024, 1, 1)]
-void CSInit (uint3 id : SV_DispatchThreadID)
-{
-    if (id.x >= uint(VertexCount)) return;
-
-    FixedBuffer[id.x] = 0;
-}
-
-[numthreads(1024, 1, 1)]
+[numthreads(256, 1, 1)]
 void CSMain (uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= uint(EdgeCount)) return;
+    int idx0 = id.x;
 
-    int index0 = EdgeBuffer[id.x].index0;
-    int index1 = EdgeBuffer[id.x].index1;
+    if (idx0 >= VertexCount) return;
 
-    float3 src0 = SrcVertexBuffer[index0].position;
-    float3 src1 = SrcVertexBuffer[index1].position;
+    float3 src0 = SrcVertexBuffer[idx0].position;
+    float3 dst0 = mul(AdjustMatrix, float4(DstVertexBuffer[idx0].position, 1)).xyz;
 
-    float3 dst0 = mul(AdjustMatrix, float4(DstVertexBuffer[index0].position, 1.0)).xyz;
-    float3 dst1 = mul(AdjustMatrix, float4(DstVertexBuffer[index1].position, 1.0)).xyz;
+    float Ae[6] = { 0, 0, 0, 0, 0, 0 };
+    float3x3 B = 0;
 
-    float elasticity = length(dst1 - dst0) / length(src1 - src0);
-    float influence0 = elasticity / DegreeBuffer[index0];
-    float influence1 = elasticity / DegreeBuffer[index1];
+    int2 address = AddressBuffer[idx0];
 
-    InterlockedAdd(FixedBuffer[index0], ToFixed(influence0));
-    InterlockedAdd(FixedBuffer[index1], ToFixed(influence1));
-}
+    [loop]
+    for (int i = address.x; i < address.y; i++)
+    {
+        int idx1 = AdjacentBuffer[i];
 
-[numthreads(1024, 1, 1)]
-void CSPost (uint3 id : SV_DispatchThreadID)
-{
-    if (id.x >= uint(VertexCount)) return;
+        float3 src1 = SrcVertexBuffer[idx1].position;
+        float3 dst1 = mul(AdjustMatrix, float4(DstVertexBuffer[idx1].position, 1)).xyz;
 
-    FloatBuffer[id.x] = ToFloat(FixedBuffer[id.x]);
+        float3 e_ref = src1 - src0;
+        float3 e_def = dst1 - dst0;
+        Ae[0] += e_ref.x * e_ref.x;
+        Ae[1] += e_ref.y * e_ref.y;
+        Ae[2] += e_ref.z * e_ref.z;
+        Ae[3] += e_ref.x * e_ref.y;
+        Ae[4] += e_ref.y * e_ref.z;
+        Ae[5] += e_ref.z * e_ref.x;
+
+        B[0] += e_def * e_ref.x;
+        B[1] += e_def * e_ref.y;
+        B[2] += e_def * e_ref.z;
+    }
+
+    float3x3 A = float3x3(
+        Ae[0], Ae[3], Ae[5],
+        Ae[3], Ae[1], Ae[4],
+        Ae[5], Ae[4], Ae[2]
+    );
+
+    float3x3 F = B * inverse(A);
+    float3x3 E = (transpose(F) * F - float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1)) * 0.5;
+
+    EigenBuffer[idx0] = float4(F._11, F._22, F._33, 0);
+
+    // float3 eigenValues = 0;
+    // float3x3 eigenVectors = 0;
+    // eigenDecomp(F, eigenValues, eigenVectors);
+    //
+    // float l0 = abs(eigenValues.x);
+    // float l1 = abs(eigenValues.y);
+    // float l2 = abs(eigenValues.z);
+    // if (l0 >= l1 && l0 >= l2) EigenBuffer[idx0] = float4(eigenVectors[0], eigenValues.x);
+    // else if (l1 >= l2 && l1 >= l0) EigenBuffer[idx0] = float4(eigenVectors[1], eigenValues.y);
+    // else if (l2 >= l0 && l2 >= l1) EigenBuffer[idx0] = float4(eigenVectors[2], eigenValues.z);
 }
