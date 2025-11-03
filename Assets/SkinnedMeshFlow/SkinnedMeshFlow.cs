@@ -3,6 +3,7 @@ using UnityEngine.VFX;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RenderGraphModule;
 using System.Collections.Generic;
+using System.Linq.Expressions;
 
 [VFXType(VFXTypeAttribute.Usage.GraphicsBuffer)]
 struct StandardVertex
@@ -183,6 +184,10 @@ class SkinnedMeshFlowPass : System.IDisposable
                 ctx.cmd.DispatchCompute(passData.shader, kernelId, groupX, 1, 1);
             });
         }
+
+        var block = new MaterialPropertyBlock();
+        block.SetBuffer("EigenBuffer", _eigenBuffer);
+        _skinnedMeshRenderer.SetPropertyBlock(block);
 
         _visualEffect.SetInt("VertexCount", _vertexCount);
         _visualEffect.SetSkinnedMeshRenderer("SkinnedMeshRenderer", _skinnedMeshRenderer);
