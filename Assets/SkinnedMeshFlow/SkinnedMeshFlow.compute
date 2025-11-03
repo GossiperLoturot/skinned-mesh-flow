@@ -15,15 +15,17 @@ struct StandardVertex
     float4 tangent;
 };
 
-float4x4 Matrix;
 int VertexCount;
 int EdgeCount;
-RWStructuredBuffer<StandardVertex> OriginalVertexBuffer;
-RWStructuredBuffer<StandardVertex> VertexBuffer;
+float4x4 AdjustMatrix;
+
+RWStructuredBuffer<StandardVertex> SrcVertexBuffer;
+RWStructuredBuffer<StandardVertex> DstVertexBuffer;
 RWStructuredBuffer<Edge> EdgeBuffer;
-RWStructuredBuffer<int> CountBuffer;
-RWStructuredBuffer<int> Output0Buffer;
-RWStructuredBuffer<float> Output1Buffer;
+RWStructuredBuffer<int> DegreeBuffer;
+
+RWStructuredBuffer<int> FixedBuffer;
+RWStructuredBuffer<float> FloatBuffer;
 
 int ToFixed(float value) {
     return int(value * 1e5);
@@ -38,7 +40,7 @@ void CSInit (uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= uint(VertexCount)) return;
 
-    Output0Buffer[id.x] = 0;
+    FixedBuffer[id.x] = 0;
 }
 
 [numthreads(1024, 1, 1)]
@@ -48,13 +50,19 @@ void CSMain (uint3 id : SV_DispatchThreadID)
 
     int index0 = EdgeBuffer[id.x].index0;
     int index1 = EdgeBuffer[id.x].index1;
-    float3 src0 = OriginalVertexBuffer[index0].position;
-    float3 src1 = OriginalVertexBuffer[index1].position;
-    float3 dst0 = mul(Matrix, float4(VertexBuffer[index0].position, 1.0)).xyz;
-    float3 dst1 = mul(Matrix, float4(VertexBuffer[index1].position, 1.0)).xyz;
-    float shrink = length(dst1 - dst0) / length(src1 - src0);
-    InterlockedAdd(Output0Buffer[index0], ToFixed(shrink / CountBuffer[index0]));
-    InterlockedAdd(Output0Buffer[index1], ToFixed(shrink / CountBuffer[index1]));
+
+    float3 src0 = SrcVertexBuffer[index0].position;
+    float3 src1 = SrcVertexBuffer[index1].position;
+
+    float3 dst0 = mul(AdjustMatrix, float4(DstVertexBuffer[index0].position, 1.0)).xyz;
+    float3 dst1 = mul(AdjustMatrix, float4(DstVertexBuffer[index1].position, 1.0)).xyz;
+
+    float elasticity = length(dst1 - dst0) / length(src1 - src0);
+    float influence0 = elasticity / DegreeBuffer[index0];
+    float influence1 = elasticity / DegreeBuffer[index1];
+
+    InterlockedAdd(FixedBuffer[index0], ToFixed(influence0));
+    InterlockedAdd(FixedBuffer[index1], ToFixed(influence1));
 }
 
 [numthreads(1024, 1, 1)]
@@ -62,5 +70,5 @@ void CSPost (uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= uint(VertexCount)) return;
 
-    Output1Buffer[id.x] = ToFloat(Output0Buffer[id.x]);
+    FloatBuffer[id.x] = ToFloat(FixedBuffer[id.x]);
 }

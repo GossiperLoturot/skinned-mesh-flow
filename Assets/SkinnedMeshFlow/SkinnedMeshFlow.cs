@@ -17,6 +17,7 @@ public class SkinnedMeshFlow : MonoBehaviour
     public ComputeShader shader;
     public SkinnedMeshRenderer skinnedMeshRenderer;
     public VisualEffect visualEffect;
+
     private RenderGraph _renderGraph;
     private SkinnedMeshFlowPass _pass;
 
@@ -66,16 +67,18 @@ public class SkinnedMeshFlow : MonoBehaviour
 class PassData
 {
     public ComputeShader shader;
-    public Matrix4x4 matrix;
+
     public int vertexCount;
     public int edgeCount;
-    public BufferHandle originalVertexBuffer;
-    public BufferHandle vertexBuffer;
-    public BufferHandle vertexAddBuffer;
+    public Matrix4x4 adjustMatrix;
+
+    public BufferHandle srcVertexBuffer;
+    public BufferHandle dstVertexBuffer;
     public BufferHandle edgeBuffer;
-    public BufferHandle countBuffer;
-    public BufferHandle output0Buffer;
-    public BufferHandle output1Buffer;
+    public BufferHandle degreeBuffer;
+
+    public BufferHandle fixedBuffer;
+    public BufferHandle floatBuffer;
 }
 
 class SkinnedMeshFlowPass : System.IDisposable
@@ -86,10 +89,12 @@ class SkinnedMeshFlowPass : System.IDisposable
 
     private int _vertexCount;
     private int _edgeCount;
+
     private GraphicsBuffer _edgeBuffer;
-    private GraphicsBuffer _countBuffer;
-    private GraphicsBuffer _output0Buffer;
-    private GraphicsBuffer _output1Buffer;
+    private GraphicsBuffer _degreeBuffer;
+
+    private GraphicsBuffer _fixedBuffer;
+    private GraphicsBuffer _floatBuffer;
 
     public SkinnedMeshFlowPass(ComputeShader shader, SkinnedMeshRenderer skinnedMeshRenderer, VisualEffect visualEffect)
     {
@@ -102,105 +107,117 @@ class SkinnedMeshFlowPass : System.IDisposable
 
         _vertexCount = _skinnedMeshRenderer.sharedMesh.vertexCount;
 
-        var edgeSet = new HashSet<(int, int)>();
+        var edges = new HashSet<(int, int)>();
         var indices = new List<int>();
-        var counts = new int[_vertexCount];
         for (int i = 0; i < _skinnedMeshRenderer.sharedMesh.subMeshCount; i++)
         {
             _skinnedMeshRenderer.sharedMesh.GetTriangles(indices, i);
             for (int j = 0; j < indices.Count; j += 3)
             {
-                edgeSet.Add((indices[j + 0], indices[j + 1]));
-                edgeSet.Add((indices[j + 1], indices[j + 2]));
-                edgeSet.Add((indices[j + 2], indices[j + 0]));
+                edges.Add(CreateEdge(indices[j + 0], indices[j + 1]));
+                edges.Add(CreateEdge(indices[j + 1], indices[j + 2]));
+                edges.Add(CreateEdge(indices[j + 2], indices[j + 0]));
             }
             indices.Clear();
         }
-        foreach (var (index0, index1) in edgeSet)
+
+        var edgeData = new List<int>();
+        var degreeData = new int[_vertexCount];
+        foreach (var (index0, index1) in edges)
         {
-            indices.Add(index0);
-            indices.Add(index1);
-            counts[index0]++;
-            counts[index1]++;
+            edgeData.Add(index0);
+            edgeData.Add(index1);
+            degreeData[index0] ++;
+            degreeData[index1] ++;
         }
 
-        _edgeCount = indices.Count / 2;
+        _edgeCount = edges.Count;
         _edgeBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _edgeCount, 8);
-        _edgeBuffer.SetData(indices);
+        _edgeBuffer.SetData(edgeData);
 
-        _countBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4);
-        _countBuffer.SetData(counts);
+        _degreeBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4);
+        _degreeBuffer.SetData(degreeData);
 
-        _output0Buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4);
-        _output1Buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4);
+        _fixedBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4);
+        _floatBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4);
     }
 
     public void RecordRenderGraph(RenderGraph renderGraph)
     {
-        var originalVertexBuffer = _skinnedMeshRenderer.sharedMesh.GetVertexBuffer(0);
-        var vertexBuffer = _skinnedMeshRenderer.GetVertexBuffer();
+        var srcVertexBuffer = _skinnedMeshRenderer.sharedMesh.GetVertexBuffer(0);
+        var dstVertexBuffer = _skinnedMeshRenderer.GetVertexBuffer();
 
-        var matrix = _skinnedMeshRenderer.worldToLocalMatrix * _skinnedMeshRenderer.rootBone.localToWorldMatrix;
+        if (dstVertexBuffer == null) return;
+
+        var adjustMatrix = _skinnedMeshRenderer.worldToLocalMatrix * _skinnedMeshRenderer.rootBone.localToWorldMatrix;
 
         using (var builder = renderGraph.AddComputePass<PassData>("Skinned Mesh Flow Pass", out var passData))
         {
             passData.shader = _shader;
-            passData.matrix = matrix;
+
             passData.vertexCount = _vertexCount;
             passData.edgeCount = _edgeCount;
-            passData.originalVertexBuffer = renderGraph.ImportBuffer(originalVertexBuffer);
-            passData.vertexBuffer = renderGraph.ImportBuffer(vertexBuffer);
+            passData.adjustMatrix = adjustMatrix;
+
+            passData.srcVertexBuffer = renderGraph.ImportBuffer(srcVertexBuffer);
+            passData.dstVertexBuffer = renderGraph.ImportBuffer(dstVertexBuffer);
             passData.edgeBuffer = renderGraph.ImportBuffer(_edgeBuffer);
-            passData.countBuffer = renderGraph.ImportBuffer(_countBuffer);
-            passData.output0Buffer = renderGraph.ImportBuffer(_output0Buffer);
-            passData.output1Buffer = renderGraph.ImportBuffer(_output1Buffer);
+            passData.degreeBuffer = renderGraph.ImportBuffer(_degreeBuffer);
+
+            passData.fixedBuffer = renderGraph.ImportBuffer(_fixedBuffer);
+            passData.floatBuffer = renderGraph.ImportBuffer(_floatBuffer);
 
             builder.SetRenderFunc(static (PassData passData, ComputeGraphContext ctx) =>
             {
                 int kernelId;
                 int groupX;
 
-                // fill output buffer with zero
+                ctx.cmd.SetComputeIntParam(passData.shader, "VertexCount", passData.vertexCount);
+                ctx.cmd.SetComputeIntParam(passData.shader, "EdgeCount", passData.edgeCount);
+                ctx.cmd.SetComputeMatrixParam(passData.shader, "AdjustMatrix", passData.adjustMatrix);
+
+                // initialize
                 kernelId = passData.shader.FindKernel("CSInit");
                 groupX = passData.vertexCount / 1024 + 1;
-                ctx.cmd.SetComputeIntParam(passData.shader, "VertexCount", passData.vertexCount);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "Output0Buffer", passData.output0Buffer);
+                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "FixedBuffer", passData.fixedBuffer);
                 ctx.cmd.DispatchCompute(passData.shader, kernelId, groupX, 1, 1);
 
                 // compute flow
                 kernelId = passData.shader.FindKernel("CSMain");
                 groupX = passData.edgeCount / 1024 + 1;
-                ctx.cmd.SetComputeMatrixParam(passData.shader, "Matrix", passData.matrix);
-                ctx.cmd.SetComputeIntParam(passData.shader, "VertexCount", passData.vertexCount);
-                ctx.cmd.SetComputeIntParam(passData.shader, "EdgeCount", passData.edgeCount);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "OriginalVertexBuffer", passData.originalVertexBuffer);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "VertexBuffer", passData.vertexBuffer);
+                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "SrcVertexBuffer", passData.srcVertexBuffer);
+                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "DstVertexBuffer", passData.dstVertexBuffer);
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "EdgeBuffer", passData.edgeBuffer);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "CountBuffer", passData.countBuffer);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "Output0Buffer", passData.output0Buffer);
+                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "DegreeBuffer", passData.degreeBuffer);
+                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "FixedBuffer", passData.fixedBuffer);
                 ctx.cmd.DispatchCompute(passData.shader, kernelId, groupX, 1, 1);
 
                 // post
                 kernelId = passData.shader.FindKernel("CSPost");
                 groupX = passData.vertexCount / 1024 + 1;
-                ctx.cmd.SetComputeIntParam(passData.shader, "VertexCount", passData.vertexCount);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "Output0Buffer", passData.output0Buffer);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "Output1Buffer", passData.output1Buffer);
+                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "FixedBuffer", passData.fixedBuffer);
+                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "FloatBuffer", passData.floatBuffer);
                 ctx.cmd.DispatchCompute(passData.shader, kernelId, groupX, 1, 1);
             });
         }
 
         _visualEffect.SetInt("VertexCount", _vertexCount);
         _visualEffect.SetSkinnedMeshRenderer("SkinnedMeshRenderer", _skinnedMeshRenderer);
-        _visualEffect.SetGraphicsBuffer("PositionBuffer", _output1Buffer);
+        _visualEffect.SetGraphicsBuffer("ElasticityBuffer", _floatBuffer);
         _visualEffect.Play();
     }
 
     public void Dispose()
     {
         _edgeBuffer.Dispose();
-        _countBuffer.Dispose();
-        _output0Buffer.Dispose();
-        _output1Buffer.Dispose();
+        _degreeBuffer.Dispose();
+
+        _fixedBuffer.Dispose();
+        _floatBuffer.Dispose();
+    }
+
+    private (int, int) CreateEdge(int index0, int index1)
+    {
+        return index0 < index1 ? (index0, index1) : (index1, index0);
     }
 }
