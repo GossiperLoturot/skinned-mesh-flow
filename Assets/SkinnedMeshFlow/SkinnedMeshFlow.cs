@@ -3,7 +3,6 @@ using UnityEngine.VFX;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RenderGraphModule;
 using System.Collections.Generic;
-using System.Linq.Expressions;
 
 [VFXType(VFXTypeAttribute.Usage.GraphicsBuffer)]
 struct StandardVertex
@@ -76,7 +75,8 @@ class PassData
     public BufferHandle dstVertexBuffer;
     public BufferHandle adjacentBuffer;
     public BufferHandle addressBuffer;
-    public BufferHandle eigenBuffer;
+    public BufferHandle eigenpairBuffer;
+    public BufferHandle strainBuffer;
 }
 
 class SkinnedMeshFlowPass : System.IDisposable
@@ -89,7 +89,8 @@ class SkinnedMeshFlowPass : System.IDisposable
 
     private GraphicsBuffer _adjacentBuffer;
     private GraphicsBuffer _addressBuffer;
-    private GraphicsBuffer _eigenBuffer;
+    private GraphicsBuffer _eigenpairBuffer;
+    private GraphicsBuffer _strainBuffer;
 
     public SkinnedMeshFlowPass(ComputeShader shader, SkinnedMeshRenderer skinnedMeshRenderer, VisualEffect visualEffect)
     {
@@ -102,27 +103,23 @@ class SkinnedMeshFlowPass : System.IDisposable
 
         _vertexCount = _skinnedMeshRenderer.sharedMesh.vertexCount;
 
-        // build edge
-        var edges = new HashSet<(int, int)>();
+        // build ajdacent list
+        var adjacentLists = new List<(int, int)>[_vertexCount];
+        for (int i = 0; i < _vertexCount; i++) adjacentLists[i] = new List<(int, int)>();
         var indices = new List<int>();
         for (int i = 0; i < _skinnedMeshRenderer.sharedMesh.subMeshCount; i++)
         {
             _skinnedMeshRenderer.sharedMesh.GetTriangles(indices, i);
             for (int j = 0; j < indices.Count; j += 3)
             {
-                edges.Add(CreateEdge(indices[j + 0], indices[j + 1]));
-                edges.Add(CreateEdge(indices[j + 1], indices[j + 2]));
-                edges.Add(CreateEdge(indices[j + 2], indices[j + 0]));
+                var idx0 = indices[j + 0];
+                var idx1 = indices[j + 1];
+                var idx2 = indices[j + 2];
+                adjacentLists[idx0].Add((idx1, idx2));
+                adjacentLists[idx1].Add((idx2, idx0));
+                adjacentLists[idx2].Add((idx0, idx1));
             }
             indices.Clear();
-        }
-        // build ajdacent list
-        var adjacentLists = new List<int>[_vertexCount];
-        for (int i = 0; i < _vertexCount; i++) adjacentLists[i] = new List<int>();
-        foreach (var (idx0, idx1) in edges)
-        {
-            adjacentLists[idx0].Add(idx1);
-            adjacentLists[idx1].Add(idx0);
         }
         // build buffer data
         var adjacents = new List<int>();
@@ -130,21 +127,25 @@ class SkinnedMeshFlowPass : System.IDisposable
         for (int i = 0; i < _vertexCount; i++)
         {
             var startIdx = adjacents.Count;
-            adjacents.AddRange(adjacentLists[i]);
+            foreach (var (idx0, idx1) in adjacentLists[i])
+            {
+                adjacents.Add(idx0);
+                adjacents.Add(idx1);
+            }
             var endIdx = adjacents.Count;
-
-            neighbors.Add(startIdx);
-            neighbors.Add(endIdx);
+            neighbors.Add(startIdx / 2);
+            neighbors.Add(endIdx / 2);
         }
 
         var adjacentCount = adjacents.Count;
-        _adjacentBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacentCount, 4);
+        _adjacentBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacentCount, 4 * 2);
         _adjacentBuffer.SetData(adjacents);
 
         _addressBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4 * 2);
         _addressBuffer.SetData(neighbors);
 
-        _eigenBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4 * 4);
+        _eigenpairBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4 * 16);
+        _strainBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4 * 6);
     }
 
     public void RecordRenderGraph(RenderGraph renderGraph)
@@ -167,7 +168,7 @@ class SkinnedMeshFlowPass : System.IDisposable
             passData.dstVertexBuffer = renderGraph.ImportBuffer(dstVertexBuffer);
             passData.adjacentBuffer = renderGraph.ImportBuffer(_adjacentBuffer);
             passData.addressBuffer = renderGraph.ImportBuffer(_addressBuffer);
-            passData.eigenBuffer = renderGraph.ImportBuffer(_eigenBuffer);
+            passData.eigenpairBuffer = renderGraph.ImportBuffer(_eigenpairBuffer);
 
             builder.SetRenderFunc(static (PassData passData, ComputeGraphContext ctx) =>
             {
@@ -180,18 +181,19 @@ class SkinnedMeshFlowPass : System.IDisposable
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "DstVertexBuffer", passData.dstVertexBuffer);
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "AdjacentBuffer", passData.adjacentBuffer);
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "AddressBuffer", passData.addressBuffer);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "EigenBuffer", passData.eigenBuffer);
+                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "EigenpairBuffer", passData.eigenpairBuffer);
+                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "StrainBuffer", passData.strainBuffer);
                 ctx.cmd.DispatchCompute(passData.shader, kernelId, groupX, 1, 1);
             });
         }
 
         var block = new MaterialPropertyBlock();
-        block.SetBuffer("EigenBuffer", _eigenBuffer);
+        block.SetBuffer("StrainBuffer", _strainBuffer);
         _skinnedMeshRenderer.SetPropertyBlock(block);
 
         _visualEffect.SetInt("VertexCount", _vertexCount);
         _visualEffect.SetSkinnedMeshRenderer("SkinnedMeshRenderer", _skinnedMeshRenderer);
-        _visualEffect.SetGraphicsBuffer("EigenBuffer", _eigenBuffer);
+        _visualEffect.SetGraphicsBuffer("EigenpairBuffer", _eigenpairBuffer);
         _visualEffect.Play();
     }
 
@@ -199,11 +201,7 @@ class SkinnedMeshFlowPass : System.IDisposable
     {
         _adjacentBuffer.Dispose();
         _addressBuffer.Dispose();
-        _eigenBuffer.Dispose();
-    }
-
-    private (int, int) CreateEdge(int index0, int index1)
-    {
-        return index0 < index1 ? (index0, index1) : (index1, index0);
+        _eigenpairBuffer.Dispose();
+        _strainBuffer.Dispose();
     }
 }

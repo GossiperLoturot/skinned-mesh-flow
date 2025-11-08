@@ -24,7 +24,7 @@ float3x3 inverse(float3x3 m)
 
 void jacobiRotate(inout float3x3 A, inout float3x3 X, int p, int q)
 {
-    if (abs(A[p][q]) < 1e-8)
+    if (abs(A[p][q]) < 1e-6)
     {
         A[p][q] = A[q][p] = 0;
         return;
@@ -77,6 +77,8 @@ void eigenDecomp(in float3x3 M, out float3 eigenValues, out float3x3 eigenVector
         jacobiRotate(A, eigenVectors, 2, 0);
     }
 
+    eigenVectors = transpose(eigenVectors);
+
     eigenValues = float3(A._11, A._22, A._33);
 }
 
@@ -85,9 +87,9 @@ float4x4 AdjustMatrix;
 
 RWStructuredBuffer<StandardVertex> SrcVertexBuffer;
 RWStructuredBuffer<StandardVertex> DstVertexBuffer;
-RWStructuredBuffer<int> AdjacentBuffer;
+RWStructuredBuffer<int2> AdjacentBuffer;
 RWStructuredBuffer<int2> AddressBuffer;
-RWStructuredBuffer<float4> EigenBuffer;
+RWStructuredBuffer<float4x4> EigenpairBuffer;
 
 [numthreads(256, 1, 1)]
 void CSMain (uint3 id : SV_DispatchThreadID)
@@ -96,58 +98,60 @@ void CSMain (uint3 id : SV_DispatchThreadID)
 
     if (idx0 >= VertexCount) return;
 
-    float3 src0 = SrcVertexBuffer[idx0].position;
-    float3 dst0 = mul(AdjustMatrix, float4(DstVertexBuffer[idx0].position, 1)).xyz;
+    StandardVertex srcVertex = SrcVertexBuffer[idx0];
+    StandardVertex dstVertex = DstVertexBuffer[idx0];
 
-    float A_[6] = { 0, 0, 0, 0, 0, 0 };
-    float3x3 B = 0;
+    float3 src0 = srcVertex.position;
+    float3 dst0 = mul(AdjustMatrix, float4(dstVertex.position, 1)).xyz;
+
+    float3x3 srcA = 0;
+    float3x3 dstA = 0;
+    float3x3 F = 0;
+    float F_norm = 0;
 
     int2 address = AddressBuffer[idx0];
 
     [loop]
     for (int i = address.x; i < address.y; i++)
     {
-        int idx1 = AdjacentBuffer[i];
+        int idx1 = AdjacentBuffer[i].x;
+        int idx2 = AdjacentBuffer[i].y;
 
-        float3 src1 = SrcVertexBuffer[idx1].position;
-        float3 dst1 = mul(AdjustMatrix, float4(DstVertexBuffer[idx1].position, 1)).xyz;
+        srcA[0] = SrcVertexBuffer[idx1].position - src0;
+        srcA[1] = SrcVertexBuffer[idx2].position - src0;
+        srcA[2] = normalize(cross(srcA[0], srcA[1]));
+        srcA = transpose(srcA);
 
-        float3 e_ref = src1 - src0;
-        float3 e_def = dst1 - dst0;
+        dstA[0] = mul(AdjustMatrix, float4(DstVertexBuffer[idx1].position, 1)).xyz - dst0;
+        dstA[1] = mul(AdjustMatrix, float4(DstVertexBuffer[idx2].position, 1)).xyz - dst0;
+        dstA[2] = normalize(cross(dstA[0], dstA[1]));
+        dstA = transpose(dstA);
 
-        A_[0] += e_ref.x * e_ref.x;
-        A_[1] += e_ref.y * e_ref.y;
-        A_[2] += e_ref.z * e_ref.z;
-        A_[3] += e_ref.x * e_ref.y;
-        A_[4] += e_ref.y * e_ref.z;
-        A_[5] += e_ref.z * e_ref.x;
-
-        B[0] += e_def * e_ref.x;
-        B[1] += e_def * e_ref.y;
-        B[2] += e_def * e_ref.z;
+        F += mul(dstA, inverse(srcA));
+        F_norm += 1.0;
     }
+    F = F / F_norm;
 
-    float3x3 A = float3x3(
-        A_[0], A_[3], A_[5],
-        A_[3], A_[1], A_[4],
-        A_[5], A_[4], A_[2]
-    );
+    float3x3 C = mul(transpose(F), F);
+    float3x3 E = 0.5 * (C - float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1));
 
-    A._11 += 1e-8;
-    A._22 += 1e-8;
-    A._33 += 1e-8;
+    float3x3 srcTBN = 0;
+    srcTBN[2] = normalize(srcVertex.normal);
+    srcTBN[0] = normalize(srcVertex.tangent.xyz);
+    srcTBN[1] = cross(srcTBN[2], srcTBN[0]) * srcVertex.tangent.w;
+    srcTBN = transpose(srcTBN);
+    float3x3 dstTBN = 0;
+    dstTBN[2] = normalize(dstVertex.normal);
+    dstTBN[0] = normalize(dstVertex.tangent.xyz);
+    dstTBN[1] = cross(dstTBN[2], dstTBN[0]) * dstVertex.tangent.w;
+    dstTBN = transpose(dstTBN);
 
-    float3x3 F = mul(inverse(A), B);
-    float3x3 E = (transpose(F) * F - float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1)) * 0.5;
+    E = mul(mul(dstTBN, inverse(srcTBN)), E);
 
-    float3 eigenValues;
-    float3x3 eigenVectors;
-    eigenDecomp(E, eigenValues, eigenVectors);
-    
-    float l0 = eigenValues.x;
-    float l1 = eigenValues.y;
-    float l2 = eigenValues.z;
-    if (l0 >= l1 && l0 >= l2) EigenBuffer[idx0] = float4(eigenVectors[0], l0);
-    else if (l1 >= l2 && l1 >= l0) EigenBuffer[idx0] = float4(eigenVectors[1], l1);
-    else if (l2 >= l0 && l2 >= l1) EigenBuffer[idx0] = float4(eigenVectors[2], l2);
+    float4x4 eigenpair = 0;
+    eigenpair[0].xyz = mul(E, float3(1, 0, 0));
+    eigenpair[1].xyz = mul(E, float3(0, 1, 0));
+    eigenpair[2].xyz = mul(E, float3(0, 0, 1));
+    eigenpair[3].xyz = float3(1, 1, 1);
+    EigenpairBuffer[idx0] = eigenpair;
 }
