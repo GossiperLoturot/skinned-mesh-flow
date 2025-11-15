@@ -89,6 +89,7 @@ RWStructuredBuffer<StandardVertex> SrcVertexBuffer;
 RWStructuredBuffer<StandardVertex> DstVertexBuffer;
 RWStructuredBuffer<int2> AdjacentBuffer;
 RWStructuredBuffer<int2> AddressBuffer;
+RWStructuredBuffer<float3> StrainBuffer;
 RWStructuredBuffer<float4x4> EigenpairBuffer;
 
 [numthreads(256, 1, 1)]
@@ -98,16 +99,31 @@ void CSMain (uint3 id : SV_DispatchThreadID)
 
     if (idx0 >= VertexCount) return;
 
-    StandardVertex srcVertex = SrcVertexBuffer[idx0];
-    StandardVertex dstVertex = DstVertexBuffer[idx0];
+    float3 srcPosition = SrcVertexBuffer[idx0].position;
+    float3 dstPosition = DstVertexBuffer[idx0].position;
 
-    float3 src0 = srcVertex.position;
-    float3 dst0 = mul(AdjustMatrix, float4(dstVertex.position, 1)).xyz;
+    // Create World to TBN matrix on source mesh
+    StandardVertex srcVertex = SrcVertexBuffer[idx0];
+    float3x3 srcTBN = 0;
+    srcTBN[0] = srcVertex.tangent.xyz;
+    srcTBN[1] = cross(srcVertex.normal, srcVertex.tangent.xyz) * srcVertex.tangent.w;
+    srcTBN[2] = srcVertex.normal;
+    srcTBN = transpose(srcTBN);
+    srcTBN = inverse(srcTBN);
+
+    // Create World to TBN matrix on destination mesh
+    StandardVertex dstVertex = DstVertexBuffer[idx0];
+    float3x3 dstTBN = 0;
+    dstTBN[2] = dstVertex.normal;
+    dstTBN[0] = dstVertex.tangent.xyz;
+    dstTBN[1] = cross(dstVertex.normal, dstVertex.tangent.xyz) * dstVertex.tangent.w;
+    dstTBN = transpose(dstTBN);
+    dstTBN = inverse(dstTBN);
 
     float3x3 srcA = 0;
     float3x3 dstA = 0;
     float3x3 F = 0;
-    float F_norm = 0;
+    float F_area = 0;
 
     int2 address = AddressBuffer[idx0];
 
@@ -117,41 +133,44 @@ void CSMain (uint3 id : SV_DispatchThreadID)
         int idx1 = AdjacentBuffer[i].x;
         int idx2 = AdjacentBuffer[i].y;
 
-        srcA[0] = SrcVertexBuffer[idx1].position - src0;
-        srcA[1] = SrcVertexBuffer[idx2].position - src0;
+        float3 srcPosition1 = SrcVertexBuffer[idx1].position;
+        float3 srcPosition2 = SrcVertexBuffer[idx2].position;
+        srcA[0] = srcPosition1 - srcPosition;
+        srcA[1] = srcPosition2 - srcPosition;
         srcA[2] = normalize(cross(srcA[0], srcA[1]));
         srcA = transpose(srcA);
+        srcA = mul(srcTBN, srcA);
 
-        dstA[0] = mul(AdjustMatrix, float4(DstVertexBuffer[idx1].position, 1)).xyz - dst0;
-        dstA[1] = mul(AdjustMatrix, float4(DstVertexBuffer[idx2].position, 1)).xyz - dst0;
+        float3 dstPosition1 = DstVertexBuffer[idx1].position;
+        float3 dstPosition2 = DstVertexBuffer[idx2].position;
+        dstA[0] = dstPosition1 - dstPosition;
+        dstA[1] = dstPosition2 - dstPosition;
         dstA[2] = normalize(cross(dstA[0], dstA[1]));
         dstA = transpose(dstA);
+        dstA = mul(dstTBN, dstA);
 
-        F += mul(dstA, inverse(srcA));
-        F_norm += 1.0;
+        float area = length(cross(srcPosition1 - srcPosition, srcPosition2 - srcPosition)) * 0.5;
+        F += area * mul(dstA, inverse(srcA));
+        F_area += area;
     }
-    F = F / F_norm;
+    F = F / F_area;
 
     float3x3 C = mul(transpose(F), F);
     float3x3 E = 0.5 * (C - float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1));
 
-    float3x3 srcTBN = 0;
-    srcTBN[2] = normalize(srcVertex.normal);
-    srcTBN[0] = normalize(srcVertex.tangent.xyz);
-    srcTBN[1] = cross(srcTBN[2], srcTBN[0]) * srcVertex.tangent.w;
-    srcTBN = transpose(srcTBN);
-    float3x3 dstTBN = 0;
-    dstTBN[2] = normalize(dstVertex.normal);
-    dstTBN[0] = normalize(dstVertex.tangent.xyz);
-    dstTBN[1] = cross(dstTBN[2], dstTBN[0]) * dstVertex.tangent.w;
-    dstTBN = transpose(dstTBN);
+    float3 eigenValues;
+    float3x3 eigenVectors;
+    eigenDecomp(E, eigenValues, eigenVectors);
 
-    E = mul(mul(dstTBN, inverse(srcTBN)), E);
+    float3 l = abs(eigenValues);
+    if (l.x >= l.y && l.x >= l.z) StrainBuffer[idx0] = float3(eigenVectors[0].xy, eigenValues.x);
+    if (l.y >= l.z && l.y >= l.x) StrainBuffer[idx0] = float3(eigenVectors[1].xy, eigenValues.y);
+    if (l.z >= l.x && l.z >= l.y) StrainBuffer[idx0] = float3(eigenVectors[2].xy, eigenValues.z);
 
     float4x4 eigenpair = 0;
-    eigenpair[0].xyz = mul(E, float3(1, 0, 0));
-    eigenpair[1].xyz = mul(E, float3(0, 1, 0));
-    eigenpair[2].xyz = mul(E, float3(0, 0, 1));
-    eigenpair[3].xyz = float3(1, 1, 1);
+    eigenpair[0].xyz = eigenVectors[0];
+    eigenpair[1].xyz = eigenVectors[1];
+    eigenpair[2].xyz = eigenVectors[2];
+    eigenpair[3].xyz = eigenValues;
     EigenpairBuffer[idx0] = eigenpair;
 }

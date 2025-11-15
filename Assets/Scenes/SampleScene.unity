@@ -131,7 +131,7 @@ GameObject:
   - component: {fileID: 59747778}
   - component: {fileID: 59747777}
   m_Layer: 0
-  m_Name: SkinnedMeshFlow
+  m_Name: Eigenpair
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0

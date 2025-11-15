@@ -75,8 +75,8 @@ class PassData
     public BufferHandle dstVertexBuffer;
     public BufferHandle adjacentBuffer;
     public BufferHandle addressBuffer;
-    public BufferHandle eigenpairBuffer;
     public BufferHandle strainBuffer;
+    public BufferHandle eigenpairBuffer;
 }
 
 class SkinnedMeshFlowPass : System.IDisposable
@@ -89,11 +89,15 @@ class SkinnedMeshFlowPass : System.IDisposable
 
     private GraphicsBuffer _adjacentBuffer;
     private GraphicsBuffer _addressBuffer;
-    private GraphicsBuffer _eigenpairBuffer;
     private GraphicsBuffer _strainBuffer;
+    private GraphicsBuffer _eigenpairBuffer;
 
     public SkinnedMeshFlowPass(ComputeShader shader, SkinnedMeshRenderer skinnedMeshRenderer, VisualEffect visualEffect)
     {
+        if (shader == null) throw new System.ArgumentNullException(nameof(shader));
+        if (skinnedMeshRenderer == null) throw new System.ArgumentNullException(nameof(skinnedMeshRenderer));
+        // visualEffect can be null
+
         _shader = shader;
         _skinnedMeshRenderer = skinnedMeshRenderer;
         _visualEffect = visualEffect;
@@ -144,8 +148,8 @@ class SkinnedMeshFlowPass : System.IDisposable
         _addressBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4 * 2);
         _addressBuffer.SetData(neighbors);
 
+        _strainBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4 * 3);
         _eigenpairBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4 * 16);
-        _strainBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4 * 6);
     }
 
     public void RecordRenderGraph(RenderGraph renderGraph)
@@ -168,6 +172,7 @@ class SkinnedMeshFlowPass : System.IDisposable
             passData.dstVertexBuffer = renderGraph.ImportBuffer(dstVertexBuffer);
             passData.adjacentBuffer = renderGraph.ImportBuffer(_adjacentBuffer);
             passData.addressBuffer = renderGraph.ImportBuffer(_addressBuffer);
+            passData.strainBuffer = renderGraph.ImportBuffer(_strainBuffer);
             passData.eigenpairBuffer = renderGraph.ImportBuffer(_eigenpairBuffer);
 
             builder.SetRenderFunc(static (PassData passData, ComputeGraphContext ctx) =>
@@ -181,8 +186,8 @@ class SkinnedMeshFlowPass : System.IDisposable
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "DstVertexBuffer", passData.dstVertexBuffer);
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "AdjacentBuffer", passData.adjacentBuffer);
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "AddressBuffer", passData.addressBuffer);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "EigenpairBuffer", passData.eigenpairBuffer);
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "StrainBuffer", passData.strainBuffer);
+                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "EigenpairBuffer", passData.eigenpairBuffer);
                 ctx.cmd.DispatchCompute(passData.shader, kernelId, groupX, 1, 1);
             });
         }
@@ -191,17 +196,20 @@ class SkinnedMeshFlowPass : System.IDisposable
         block.SetBuffer("StrainBuffer", _strainBuffer);
         _skinnedMeshRenderer.SetPropertyBlock(block);
 
-        _visualEffect.SetInt("VertexCount", _vertexCount);
-        _visualEffect.SetSkinnedMeshRenderer("SkinnedMeshRenderer", _skinnedMeshRenderer);
-        _visualEffect.SetGraphicsBuffer("EigenpairBuffer", _eigenpairBuffer);
-        _visualEffect.Play();
+        if (_visualEffect != null)
+        {
+            _visualEffect.SetInt("VertexCount", _vertexCount);
+            _visualEffect.SetSkinnedMeshRenderer("SkinnedMeshRenderer", _skinnedMeshRenderer);
+            _visualEffect.SetGraphicsBuffer("EigenpairBuffer", _eigenpairBuffer);
+            _visualEffect.Play();
+        }
     }
 
     public void Dispose()
     {
         _adjacentBuffer.Dispose();
         _addressBuffer.Dispose();
-        _eigenpairBuffer.Dispose();
         _strainBuffer.Dispose();
+        _eigenpairBuffer.Dispose();
     }
 }
