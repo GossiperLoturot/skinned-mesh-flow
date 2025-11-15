@@ -83,14 +83,11 @@ void eigenDecomp(in float3x3 M, out float3 eigenValues, out float3x3 eigenVector
 }
 
 int VertexCount;
-float4x4 AdjustMatrix;
-
 RWStructuredBuffer<StandardVertex> SrcVertexBuffer;
 RWStructuredBuffer<StandardVertex> DstVertexBuffer;
 RWStructuredBuffer<int2> AdjacentBuffer;
 RWStructuredBuffer<int2> AddressBuffer;
 RWStructuredBuffer<float3> StrainBuffer;
-RWStructuredBuffer<float4x4> EigenpairBuffer;
 
 [numthreads(256, 1, 1)]
 void CSMain (uint3 id : SV_DispatchThreadID)
@@ -166,11 +163,4 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     if (l.x >= l.y && l.x >= l.z) StrainBuffer[idx0] = float3(eigenVectors[0].xy, eigenValues.x);
     if (l.y >= l.z && l.y >= l.x) StrainBuffer[idx0] = float3(eigenVectors[1].xy, eigenValues.y);
     if (l.z >= l.x && l.z >= l.y) StrainBuffer[idx0] = float3(eigenVectors[2].xy, eigenValues.z);
-
-    float4x4 eigenpair = 0;
-    eigenpair[0].xyz = eigenVectors[0];
-    eigenpair[1].xyz = eigenVectors[1];
-    eigenpair[2].xyz = eigenVectors[2];
-    eigenpair[3].xyz = eigenValues;
-    EigenpairBuffer[idx0] = eigenpair;
 }

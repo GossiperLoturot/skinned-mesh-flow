@@ -1,22 +1,12 @@
 using UnityEngine;
-using UnityEngine.VFX;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RenderGraphModule;
 using System.Collections.Generic;
-
-[VFXType(VFXTypeAttribute.Usage.GraphicsBuffer)]
-struct StandardVertex
-{
-    public Vector3 position;
-    public Vector3 normal;
-    public Vector4 tangent;
-}
 
 public class SkinnedMeshFlow : MonoBehaviour
 {
     public ComputeShader shader;
     public SkinnedMeshRenderer skinnedMeshRenderer;
-    public VisualEffect visualEffect;
 
     private RenderGraph _renderGraph;
     private SkinnedMeshFlowPass _pass;
@@ -24,7 +14,7 @@ public class SkinnedMeshFlow : MonoBehaviour
     void OnEnable()
     {
         _renderGraph = new RenderGraph("Skinned Mesh Flow Graph");
-        _pass = new SkinnedMeshFlowPass(shader, skinnedMeshRenderer, visualEffect);
+        _pass = new SkinnedMeshFlowPass(shader, skinnedMeshRenderer);
 
         RenderPipelineManager.beginCameraRendering += OnBeginCamera;
     }
@@ -69,38 +59,32 @@ class PassData
     public ComputeShader shader;
 
     public int vertexCount;
-    public Matrix4x4 adjustMatrix;
 
     public BufferHandle srcVertexBuffer;
     public BufferHandle dstVertexBuffer;
     public BufferHandle adjacentBuffer;
     public BufferHandle addressBuffer;
     public BufferHandle strainBuffer;
-    public BufferHandle eigenpairBuffer;
 }
 
 class SkinnedMeshFlowPass : System.IDisposable
 {
     private ComputeShader _shader;
     private SkinnedMeshRenderer _skinnedMeshRenderer;
-    private VisualEffect _visualEffect;
 
     private int _vertexCount;
 
     private GraphicsBuffer _adjacentBuffer;
     private GraphicsBuffer _addressBuffer;
     private GraphicsBuffer _strainBuffer;
-    private GraphicsBuffer _eigenpairBuffer;
 
-    public SkinnedMeshFlowPass(ComputeShader shader, SkinnedMeshRenderer skinnedMeshRenderer, VisualEffect visualEffect)
+    public SkinnedMeshFlowPass(ComputeShader shader, SkinnedMeshRenderer skinnedMeshRenderer)
     {
         if (shader == null) throw new System.ArgumentNullException(nameof(shader));
         if (skinnedMeshRenderer == null) throw new System.ArgumentNullException(nameof(skinnedMeshRenderer));
-        // visualEffect can be null
 
         _shader = shader;
         _skinnedMeshRenderer = skinnedMeshRenderer;
-        _visualEffect = visualEffect;
 
         _skinnedMeshRenderer.sharedMesh.vertexBufferTarget |= GraphicsBuffer.Target.Structured;
         _skinnedMeshRenderer.vertexBufferTarget |= GraphicsBuffer.Target.Structured;
@@ -149,7 +133,6 @@ class SkinnedMeshFlowPass : System.IDisposable
         _addressBuffer.SetData(neighbors);
 
         _strainBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4 * 3);
-        _eigenpairBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _vertexCount, 4 * 16);
     }
 
     public void RecordRenderGraph(RenderGraph renderGraph)
@@ -166,14 +149,12 @@ class SkinnedMeshFlowPass : System.IDisposable
             passData.shader = _shader;
 
             passData.vertexCount = _vertexCount;
-            passData.adjustMatrix = adjustMatrix;
 
             passData.srcVertexBuffer = renderGraph.ImportBuffer(srcVertexBuffer);
             passData.dstVertexBuffer = renderGraph.ImportBuffer(dstVertexBuffer);
             passData.adjacentBuffer = renderGraph.ImportBuffer(_adjacentBuffer);
             passData.addressBuffer = renderGraph.ImportBuffer(_addressBuffer);
             passData.strainBuffer = renderGraph.ImportBuffer(_strainBuffer);
-            passData.eigenpairBuffer = renderGraph.ImportBuffer(_eigenpairBuffer);
 
             builder.SetRenderFunc(static (PassData passData, ComputeGraphContext ctx) =>
             {
@@ -181,13 +162,11 @@ class SkinnedMeshFlowPass : System.IDisposable
                 var kernelId = passData.shader.FindKernel("CSMain");
                 var groupX = Mathf.CeilToInt(passData.vertexCount / 256.0f);
                 ctx.cmd.SetComputeIntParam(passData.shader, "VertexCount", passData.vertexCount);
-                ctx.cmd.SetComputeMatrixParam(passData.shader, "AdjustMatrix", passData.adjustMatrix);
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "SrcVertexBuffer", passData.srcVertexBuffer);
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "DstVertexBuffer", passData.dstVertexBuffer);
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "AdjacentBuffer", passData.adjacentBuffer);
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "AddressBuffer", passData.addressBuffer);
                 ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "StrainBuffer", passData.strainBuffer);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "EigenpairBuffer", passData.eigenpairBuffer);
                 ctx.cmd.DispatchCompute(passData.shader, kernelId, groupX, 1, 1);
             });
         }
@@ -195,14 +174,6 @@ class SkinnedMeshFlowPass : System.IDisposable
         var block = new MaterialPropertyBlock();
         block.SetBuffer("StrainBuffer", _strainBuffer);
         _skinnedMeshRenderer.SetPropertyBlock(block);
-
-        if (_visualEffect != null)
-        {
-            _visualEffect.SetInt("VertexCount", _vertexCount);
-            _visualEffect.SetSkinnedMeshRenderer("SkinnedMeshRenderer", _skinnedMeshRenderer);
-            _visualEffect.SetGraphicsBuffer("EigenpairBuffer", _eigenpairBuffer);
-            _visualEffect.Play();
-        }
     }
 
     public void Dispose()
@@ -210,6 +181,5 @@ class SkinnedMeshFlowPass : System.IDisposable
         _adjacentBuffer.Dispose();
         _addressBuffer.Dispose();
         _strainBuffer.Dispose();
-        _eigenpairBuffer.Dispose();
     }
 }
