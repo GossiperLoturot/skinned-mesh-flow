@@ -105,17 +105,13 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     srcTBN[0] = srcVertex.tangent.xyz;
     srcTBN[1] = cross(srcVertex.normal, srcVertex.tangent.xyz) * srcVertex.tangent.w;
     srcTBN[2] = srcVertex.normal;
-    srcTBN = transpose(srcTBN);
-    srcTBN = inverse(srcTBN);
 
     // Create World to TBN matrix on destination mesh
     StandardVertex dstVertex = DstVertexBuffer[idx0];
     float3x3 dstTBN = 0;
-    dstTBN[2] = dstVertex.normal;
     dstTBN[0] = dstVertex.tangent.xyz;
     dstTBN[1] = cross(dstVertex.normal, dstVertex.tangent.xyz) * dstVertex.tangent.w;
-    dstTBN = transpose(dstTBN);
-    dstTBN = inverse(dstTBN);
+    dstTBN[2] = dstVertex.normal;
 
     float3x3 srcA = 0;
     float3x3 dstA = 0;
